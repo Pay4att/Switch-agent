@@ -51,6 +51,11 @@ VALID_BUTTONS = {
     "home", "capture",
     "left_stick", "right_stick",
 }
+VALID_STICKS = {"left", "right"}
+VALID_STICK_DIRECTIONS = {"up", "down", "left", "right"}
+STICK_CENTER_VALUE = 0x800
+STICK_MIN_VALUE = 0x000
+STICK_MAX_VALUE = 0xFFF
 
 
 def loop_worker():
@@ -142,6 +147,65 @@ def _looks_like_disconnect(exc):
         "ConnectionAbortedError",
     )
     return any(marker in text for marker in markers)
+
+
+def _get_stick_state(stick):
+    if controller_state is None:
+        raise RuntimeError("controller not started")
+    if stick not in VALID_STICKS:
+        raise ValueError(f"invalid stick: {stick}")
+
+    if stick == "left":
+        stick_state = controller_state.l_stick_state
+    else:
+        stick_state = controller_state.r_stick_state
+
+    if stick_state is None:
+        raise RuntimeError(f"{stick} stick is not available for this controller")
+
+    return stick_state
+
+
+def _set_stick_center(stick):
+    stick_state = _get_stick_state(stick)
+    try:
+        stick_state.set_center()
+    except Exception:
+        stick_state.set_h(STICK_CENTER_VALUE)
+        stick_state.set_v(STICK_CENTER_VALUE)
+
+
+def _set_stick_direction(stick, direction):
+    if direction not in VALID_STICK_DIRECTIONS:
+        raise ValueError(f"invalid stick direction: {direction}")
+
+    stick_state = _get_stick_state(stick)
+
+    try:
+        if direction == "up":
+            stick_state.set_up()
+        elif direction == "down":
+            stick_state.set_down()
+        elif direction == "left":
+            stick_state.set_left()
+        elif direction == "right":
+            stick_state.set_right()
+        return
+    except Exception:
+        pass
+
+    if direction == "up":
+        stick_state.set_h(STICK_CENTER_VALUE)
+        stick_state.set_v(STICK_MAX_VALUE)
+    elif direction == "down":
+        stick_state.set_h(STICK_CENTER_VALUE)
+        stick_state.set_v(STICK_MIN_VALUE)
+    elif direction == "left":
+        stick_state.set_h(STICK_MIN_VALUE)
+        stick_state.set_v(STICK_CENTER_VALUE)
+    elif direction == "right":
+        stick_state.set_h(STICK_MAX_VALUE)
+        stick_state.set_v(STICK_CENTER_VALUE)
 
 
 async def _ensure_connected_async(timeout=None):
@@ -313,6 +377,36 @@ async def press_button_async(button, sec=0.1):
         await button_push(controller_state, button, sec=float(sec))
 
     await _run_with_auto_reconnect("press", _action)
+
+
+async def push_stick_async(stick, direction, sec=0.35):
+    async def _action():
+        await _ensure_connected_async()
+        _set_stick_direction(stick, direction)
+        await controller_state.send()
+        await asyncio.sleep(float(sec))
+        _set_stick_center(stick)
+        await controller_state.send()
+
+    await _run_with_auto_reconnect(f"push_{stick}_stick", _action)
+
+
+async def hold_stick_async(stick, direction):
+    async def _action():
+        await _ensure_connected_async()
+        _set_stick_direction(stick, direction)
+        await controller_state.send()
+
+    await _run_with_auto_reconnect(f"hold_{stick}_stick", _action)
+
+
+async def release_stick_async(stick):
+    async def _action():
+        await _ensure_connected_async()
+        _set_stick_center(stick)
+        await controller_state.send()
+
+    await _run_with_auto_reconnect(f"release_{stick}_stick", _action)
 
 
 async def hold_button_async(button):
@@ -582,6 +676,112 @@ def press():
             "ok": True,
             "button": button,
             "sec": sec
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": repr(e)
+        }), 500
+
+
+@app.route("/stick/push", methods=["POST"])
+def stick_push():
+    data = request.get_json(force=True)
+
+    stick = data.get("stick", "left")
+    direction = data.get("direction")
+    sec = float(data.get("sec", 0.35))
+
+    if stick not in VALID_STICKS:
+        return jsonify({
+            "ok": False,
+            "error": f"invalid stick: {stick}",
+            "valid_sticks": sorted(VALID_STICKS)
+        }), 400
+
+    if direction not in VALID_STICK_DIRECTIONS:
+        return jsonify({
+            "ok": False,
+            "error": f"invalid stick direction: {direction}",
+            "valid_directions": sorted(VALID_STICK_DIRECTIONS)
+        }), 400
+
+    try:
+        run_async(push_stick_async(stick, direction, sec), timeout=max(10, int(sec) + 10))
+
+        return jsonify({
+            "ok": True,
+            "stick": stick,
+            "direction": direction,
+            "sec": sec,
+            "state": "push"
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": repr(e)
+        }), 500
+
+
+@app.route("/stick/hold", methods=["POST"])
+def stick_hold():
+    data = request.get_json(force=True)
+
+    stick = data.get("stick", "left")
+    direction = data.get("direction")
+
+    if stick not in VALID_STICKS:
+        return jsonify({
+            "ok": False,
+            "error": f"invalid stick: {stick}",
+            "valid_sticks": sorted(VALID_STICKS)
+        }), 400
+
+    if direction not in VALID_STICK_DIRECTIONS:
+        return jsonify({
+            "ok": False,
+            "error": f"invalid stick direction: {direction}",
+            "valid_directions": sorted(VALID_STICK_DIRECTIONS)
+        }), 400
+
+    try:
+        run_async(hold_stick_async(stick, direction), timeout=10)
+
+        return jsonify({
+            "ok": True,
+            "stick": stick,
+            "direction": direction,
+            "state": "hold"
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": repr(e)
+        }), 500
+
+
+@app.route("/stick/release", methods=["POST"])
+def stick_release():
+    data = request.get_json(silent=True) or {}
+    stick = data.get("stick", "left")
+
+    if stick not in VALID_STICKS:
+        return jsonify({
+            "ok": False,
+            "error": f"invalid stick: {stick}",
+            "valid_sticks": sorted(VALID_STICKS)
+        }), 400
+
+    try:
+        run_async(release_stick_async(stick), timeout=10)
+
+        return jsonify({
+            "ok": True,
+            "stick": stick,
+            "state": "release"
         })
 
     except Exception as e:

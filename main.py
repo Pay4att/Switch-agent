@@ -44,6 +44,7 @@ VALID_BUTTONS = (
     "left_stick",
     "right_stick",
 )
+VALID_STICK_DIRECTIONS = ("up", "down", "left", "right")
 BUTTON_PATTERNS = {
     "a": (r"a键", r"(?<![a-z])a(?![a-z])"),
     "b": (r"b键", r"(?<![a-z])b(?![a-z])"),
@@ -64,6 +65,60 @@ BUTTON_PATTERNS = {
     "left_stick": (r"左摇杆键", r"左摇杆按键", r"\bl3\b"),
     "right_stick": (r"右摇杆键", r"右摇杆按键", r"\br3\b"),
 }
+LEFT_STICK_ALIAS_PATTERNS = (
+    r"左摇杆",
+    r"左遥杆",
+    r"左摇感",
+    r"左遥感",
+    r"\bleftstick\b",
+    r"\bls\b",
+)
+RIGHT_STICK_ALIAS_PATTERNS = (
+    r"右摇杆",
+    r"右遥杆",
+    r"右摇感",
+    r"右遥感",
+    r"\brightstick\b",
+    r"\brs\b",
+    r"镜头",
+    r"视角",
+)
+GENERIC_STICK_ALIAS_PATTERNS = (r"摇杆", r"遥杆", r"摇感", r"遥感", r"\bstick\b")
+LEFT_STICK_DIRECTION_PATTERNS = {
+    "up": (r"前进", r"向前", r"往前", r"推前", r"前走", r"上移", r"往上", r"向上"),
+    "down": (r"后退", r"向后", r"往后", r"推后", r"后走", r"下移", r"往下", r"向下"),
+    "left": (r"向左", r"往左", r"左移", r"左走", r"推左"),
+    "right": (r"向右", r"往右", r"右移", r"右走", r"推右"),
+}
+RIGHT_STICK_DIRECTION_PATTERNS = {
+    "up": (
+        r"视角向上",
+        r"镜头向上",
+        r"镜头上移",
+        r"右摇杆向上",
+        r"右摇杆推上",
+        r"右摇杆往上",
+        r"右摇杆向前",
+        r"右摇杆推前",
+        r"右摇杆往前",
+    ),
+    "down": (
+        r"视角向下",
+        r"镜头向下",
+        r"镜头下移",
+        r"右摇杆向下",
+        r"右摇杆推下",
+        r"右摇杆往下",
+        r"右摇杆向后",
+        r"右摇杆推后",
+        r"右摇杆往后",
+    ),
+    "left": (r"视角向左", r"镜头向左", r"镜头左移", r"右摇杆向左", r"右摇杆推左", r"右摇杆往左"),
+    "right": (r"视角向右", r"镜头向右", r"镜头右移", r"右摇杆向右", r"右摇杆推右", r"右摇杆往右"),
+}
+STICK_HOLD_HINTS = ("推", "拨", "扳", "拉", "顶", "stick", "持续")
+LEFT_STICK_RELEASE_HINTS = ("摇杆回中", "摇杆回正", "回正摇杆", "回中摇杆", "松开摇杆", "释放摇杆", "松开左摇杆", "释放左摇杆")
+RIGHT_STICK_RELEASE_HINTS = ("松开右摇杆", "释放右摇杆", "右摇杆回中", "右摇杆回正", "镜头回正", "视角回正")
 PRESS_KEYWORDS = ("按下", "按一下", "点一下", "按一次", "轻按", "tap", "press")
 HOLD_KEYWORDS = ("长按", "按住", "一直按", "hold", "keepholding")
 RELEASE_KEYWORDS = ("松开", "释放", "release")
@@ -88,6 +143,8 @@ ButtonName = Literal[
     "left_stick",
     "right_stick",
 ]
+StickDirection = Literal["up", "down", "left", "right"]
+StickName = Literal["left", "right"]
 
 SYSTEM_PROMPT = """You are a Nintendo Switch remote controller agent.
 
@@ -105,6 +162,8 @@ Rules:
 9. Chinese phrases like 按下, 按一下, 点一下, 按一次, press, tap mean a short press. Use press_switch_button for these.
 10. Use long_press_switch_button only when the user explicitly says 长按, 按住, hold, keep holding.
 11. load_nfc_file uploads the local NFC file bytes from the local bin directory to the remote controller. Do not assume the file already exists on the remote machine.
+12. Movement requests like 前进, 后退, 向左移动, 向右移动 should use the left stick, not the d-pad, unless the user explicitly asks for 方向键.
+13. Requests mentioning 左摇杆 should use left stick tools. Requests mentioning 右摇杆, 镜头, or 视角 should use right stick tools.
 
 Examples:
 - User: 查看当前远端状态
@@ -119,6 +178,18 @@ Examples:
   Action: call press_switch_button with button="home".
 - User: 长按home键
   Action: call long_press_switch_button with button="home".
+- User: 前进
+  Action: call push_left_stick with direction="up".
+- User: 推摇杆前进
+  Action: call hold_left_stick with direction="up".
+- User: 松开摇杆
+  Action: call release_left_stick.
+- User: 右摇杆向右
+  Action: call push_right_stick with direction="right".
+- User: 推右摇杆向上
+  Action: call hold_right_stick with direction="up".
+- User: 松开右摇杆
+  Action: call release_right_stick.
 """
 
 
@@ -215,6 +286,40 @@ class SwitchRemoteClient:
 
     def sequence(self, actions: list[dict]) -> dict:
         return self._request("POST", "/sequence", {"actions": actions})
+
+    def push_left_stick(self, direction: str, sec: float = 0.35) -> dict:
+        return self._request(
+            "POST",
+            "/stick/push",
+            {"stick": "left", "direction": direction, "sec": sec},
+        )
+
+    def hold_left_stick(self, direction: str) -> dict:
+        return self._request(
+            "POST",
+            "/stick/hold",
+            {"stick": "left", "direction": direction},
+        )
+
+    def release_left_stick(self) -> dict:
+        return self._request("POST", "/stick/release", {"stick": "left"})
+
+    def push_right_stick(self, direction: str, sec: float = 0.35) -> dict:
+        return self._request(
+            "POST",
+            "/stick/push",
+            {"stick": "right", "direction": direction, "sec": sec},
+        )
+
+    def hold_right_stick(self, direction: str) -> dict:
+        return self._request(
+            "POST",
+            "/stick/hold",
+            {"stick": "right", "direction": direction},
+        )
+
+    def release_right_stick(self) -> dict:
+        return self._request("POST", "/stick/release", {"stick": "right"})
 
     def set_nfc(self, remote_file: str) -> dict:
         return self._request("POST", "/nfc", {"file": remote_file})
@@ -341,10 +446,35 @@ def truncate_items(items: list[str], limit: int) -> list[str]:
     return items[: max(limit, 1)]
 
 
+def stick_direction_label(direction: str) -> str:
+    labels = {
+        "up": "前",
+        "down": "后",
+        "left": "左",
+        "right": "右",
+    }
+    return labels.get(direction, direction)
+
+
 def _normalize_command_text(text: str) -> tuple[str, str]:
     lowered = text.casefold()
     compact = re.sub(r"\s+", "", lowered)
     return lowered, compact
+
+
+def _contains_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _contains_keyword(compact: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in compact for keyword in keywords)
+
+
+def _match_direction(text: str, pattern_map: dict[str, tuple[str, ...]]) -> str | None:
+    for direction, patterns in pattern_map.items():
+        if any(re.search(pattern, text) for pattern in patterns):
+            return direction
+    return None
 
 
 def match_direct_button_command(prompt: str) -> tuple[str, str | None] | None:
@@ -375,6 +505,47 @@ def match_direct_button_command(prompt: str) -> tuple[str, str | None] | None:
     return action, matched_buttons[0]
 
 
+def match_direct_stick_command(prompt: str) -> tuple[str, StickName, str | None] | None:
+    lowered, compact = _normalize_command_text(prompt)
+    has_left_alias = _contains_pattern(lowered, LEFT_STICK_ALIAS_PATTERNS)
+    has_right_alias = _contains_pattern(lowered, RIGHT_STICK_ALIAS_PATTERNS)
+    has_generic_alias = _contains_pattern(lowered, GENERIC_STICK_ALIAS_PATTERNS)
+    has_hold_hint = _contains_keyword(compact, HOLD_KEYWORDS + STICK_HOLD_HINTS)
+    has_release_keyword = _contains_keyword(compact, RELEASE_KEYWORDS)
+
+    left_direction = _match_direction(lowered, LEFT_STICK_DIRECTION_PATTERNS)
+    right_direction = _match_direction(lowered, RIGHT_STICK_DIRECTION_PATTERNS)
+
+    if _contains_keyword(compact, RIGHT_STICK_RELEASE_HINTS):
+        return "release_stick", "right", None
+    if _contains_keyword(compact, LEFT_STICK_RELEASE_HINTS):
+        return "release_stick", "left", None
+
+    if has_right_alias and has_release_keyword:
+        return "release_stick", "right", None
+    if (has_left_alias or has_generic_alias) and has_release_keyword:
+        return "release_stick", "left", None
+
+    if has_right_alias or right_direction is not None:
+        matched_direction = right_direction or left_direction
+        if matched_direction is None:
+            return None
+        if has_hold_hint:
+            return "hold_stick", "right", matched_direction
+        return "push_stick", "right", matched_direction
+
+    if left_direction is None:
+        return None
+
+    if (has_left_alias or has_generic_alias) and has_hold_hint:
+        return "hold_stick", "left", left_direction
+    return "push_stick", "left", left_direction
+
+
+def stick_label(stick: StickName) -> str:
+    return "右摇杆" if stick == "right" else "左摇杆"
+
+
 def ensure_remote_ready(client: SwitchRemoteClient) -> None:
     health = client.health()
     if not health.get("started") and not health.get("starting"):
@@ -385,6 +556,32 @@ def ensure_remote_ready(client: SwitchRemoteClient) -> None:
 
 
 def try_run_direct_command(client: SwitchRemoteClient, prompt: str) -> str | None:
+    stick_match = match_direct_stick_command(prompt)
+    if stick_match is not None:
+        action, stick, direction = stick_match
+        ensure_remote_ready(client)
+
+        if action == "release_stick":
+            if stick == "right":
+                client.release_right_stick()
+            else:
+                client.release_left_stick()
+            return f"已松开{stick_label(stick)}，已回正。"
+        if direction is None:
+            return None
+        if action == "push_stick":
+            if stick == "right":
+                client.push_right_stick(direction=direction, sec=0.35)
+            else:
+                client.push_left_stick(direction=direction, sec=0.35)
+            return f"已将{stick_label(stick)}短暂推向{stick_direction_label(direction)}方。"
+        if action == "hold_stick":
+            if stick == "right":
+                client.hold_right_stick(direction=direction)
+            else:
+                client.hold_left_stick(direction=direction)
+            return f"已将{stick_label(stick)}持续推向{stick_direction_label(direction)}方。"
+
     matched = match_direct_button_command(prompt)
     if matched is None:
         return None
@@ -461,6 +658,36 @@ def build_tools(client: SwitchRemoteClient, nfc_repo: NFCRepository) -> list:
         return client.release_all()
 
     @tool
+    def push_left_stick(direction: StickDirection, sec: float = 0.35) -> dict:
+        """Push the left stick briefly in one direction. Use this for 前进, 后退, 向左移动, 向右移动."""
+        return client.push_left_stick(direction=direction, sec=sec)
+
+    @tool
+    def hold_left_stick(direction: StickDirection) -> dict:
+        """Hold the left stick in one direction. Use this for 推摇杆前进, 按住摇杆向前, keep moving."""
+        return client.hold_left_stick(direction=direction)
+
+    @tool
+    def release_left_stick() -> dict:
+        """Release the left stick back to center. Use this for 松开摇杆, 摇杆回中, 停止推摇杆."""
+        return client.release_left_stick()
+
+    @tool
+    def push_right_stick(direction: StickDirection, sec: float = 0.35) -> dict:
+        """Push the right stick briefly in one direction. Use this for 镜头向右, 视角向上, 右摇杆向左."""
+        return client.push_right_stick(direction=direction, sec=sec)
+
+    @tool
+    def hold_right_stick(direction: StickDirection) -> dict:
+        """Hold the right stick in one direction. Use this for 推右摇杆向上, 持续转镜头, keep moving camera."""
+        return client.hold_right_stick(direction=direction)
+
+    @tool
+    def release_right_stick() -> dict:
+        """Release the right stick back to center. Use this for 松开右摇杆, 镜头回正, 视角回正."""
+        return client.release_right_stick()
+
+    @tool
     def press_button_sequence(
         buttons: list[ButtonName],
         press_sec: float = 0.1,
@@ -528,6 +755,12 @@ def build_tools(client: SwitchRemoteClient, nfc_repo: NFCRepository) -> list:
         long_press_switch_button,
         release_switch_button,
         release_all_switch_buttons,
+        push_left_stick,
+        hold_left_stick,
+        release_left_stick,
+        push_right_stick,
+        hold_right_stick,
+        release_right_stick,
         press_button_sequence,
         list_nfc_files,
         search_nfc_files,
@@ -587,19 +820,15 @@ def extract_last_ai_message(messages: list) -> str:
 def run_agent_prompt(
     agent,
     client: SwitchRemoteClient,
-    messages: list,
     prompt: str,
-) -> tuple[list, str]:
+) -> str:
     direct_text = try_run_direct_command(client, prompt)
     if direct_text is not None:
-        next_messages = [*messages, HumanMessage(content=prompt), AIMessage(content=direct_text)]
-        return next_messages, direct_text
+        return direct_text
 
-    next_input = [*messages, HumanMessage(content=prompt)]
-    result = agent.invoke({"messages": next_input})
-    next_messages = result["messages"]
-    text = extract_last_ai_message(next_messages)
-    return next_messages, text or "(no assistant text returned)"
+    result = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+    text = extract_last_ai_message(result["messages"])
+    return text or "(no assistant text returned)"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -658,9 +887,8 @@ def main() -> int:
     except Exception as exc:  # pragma: no cover - network dependent
         print(f"[warn] remote health check failed: {exc}", file=sys.stderr)
 
-    messages: list = []
     if args.prompt:
-        messages, text = run_agent_prompt(agent, client, messages, args.prompt)
+        text = run_agent_prompt(agent, client, args.prompt)
         print(text)
         return 0
 
@@ -678,7 +906,7 @@ def main() -> int:
             return 0
 
         try:
-            messages, text = run_agent_prompt(agent, client, messages, prompt)
+            text = run_agent_prompt(agent, client, prompt)
             print(f"agent> {text}")
         except Exception as exc:
             print(f"agent> error: {exc}")
