@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -14,11 +15,60 @@ from joycontrol.controller_state import button_push
 from joycontrol.transport import NotConnectedError
 
 
+BT_ADDR_RE = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
+
+
+def _normalize_bt_addr(value):
+    if value is None:
+        return None
+
+    text = str(value).strip().strip("'\"")
+    if not text:
+        return None
+
+    text = text.replace("：", ":").replace("-", ":").upper()
+
+    if BT_ADDR_RE.fullmatch(text):
+        return text
+
+    compact = re.sub(r"[^0-9A-F]", "", text)
+    if len(compact) == 12:
+        normalized = ":".join(compact[index:index + 2] for index in range(0, 12, 2))
+        if BT_ADDR_RE.fullmatch(normalized):
+            return normalized
+
+    return None
+
+
+def _parse_reconnect_bt_addr(value, *, source="reconnect_bt_addr", strict=False):
+    if value is None:
+        return None
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    normalized = _normalize_bt_addr(raw)
+    if normalized is not None:
+        return normalized
+
+    if strict:
+        raise ValueError(
+            f"invalid {source}: {raw!r}; expected format XX:XX:XX:XX:XX:XX"
+        )
+
+    return None
+
+
 app = Flask(__name__)
 
-DEFAULT_RECONNECT_BT_ADDR = os.environ.get(
+DEFAULT_RECONNECT_BT_ADDR = _parse_reconnect_bt_addr(
+    os.environ.get(
     "SWITCH_RECONNECT_BT_ADDR",
     "78:81:8C:16:7B:A9",
+    ),
+    source="SWITCH_RECONNECT_BT_ADDR",
+    strict=False,
 )
 AUTO_RECONNECT_ENABLED = os.environ.get("SWITCH_AUTO_RECONNECT", "1") not in {
     "0", "false", "False", "no", "NO"
@@ -80,6 +130,13 @@ def _format_start_error(exc):
             "the Switch, or the BlueZ input plugin is conflicting. If this host is "
             "dedicated to joycontrol, disable the plugin with "
             "'--noplugin=input' and restart bluetooth."
+        )
+
+    if isinstance(exc, OSError) and "bad bluetooth address" in str(exc).lower():
+        return (
+            "bad bluetooth address. "
+            "Expected reconnect_bt_addr format XX:XX:XX:XX:XX:XX. "
+            "Clear the invalid address, or pass a valid Switch MAC."
         )
 
     return repr(exc)
@@ -239,7 +296,11 @@ async def _bootstrap_controller_async(
 ):
     global transport, protocol, controller_state, started, connected, starting, last_error
 
-    effective_reconnect_bt_addr = reconnect_bt_addr or reconnect_bt_addr_global
+    effective_reconnect_bt_addr = _parse_reconnect_bt_addr(
+        reconnect_bt_addr if reconnect_bt_addr is not None else reconnect_bt_addr_global,
+        source="reconnect_bt_addr",
+        strict=False,
+    )
 
     controller = Controller.from_arg(controller_name)
     factory = controller_protocol_factory(controller)
@@ -283,6 +344,7 @@ async def start_controller_async(
     controller_name="PRO_CONTROLLER",
     device_id=None,
     reconnect_bt_addr=None,
+    set_reconnect_bt_addr=False,
     force_restart=False
 ):
     global started, connected, starting, startup_task, last_error
@@ -299,10 +361,16 @@ async def start_controller_async(
     if started and controller_state is not None and not _is_transport_active():
         await stop_controller_async(clear_last_error=False)
 
+    normalized_reconnect_bt_addr = _parse_reconnect_bt_addr(
+        reconnect_bt_addr,
+        source="reconnect_bt_addr",
+        strict=reconnect_bt_addr is not None,
+    )
+
     controller_name_global = controller_name
     device_id_global = device_id
-    if reconnect_bt_addr:
-        reconnect_bt_addr_global = reconnect_bt_addr
+    if set_reconnect_bt_addr:
+        reconnect_bt_addr_global = normalized_reconnect_bt_addr
     started = True
     connected = False
     starting = True
@@ -312,7 +380,7 @@ async def start_controller_async(
         _bootstrap_controller_async(
             controller_name=controller_name,
             device_id=device_id,
-            reconnect_bt_addr=reconnect_bt_addr
+            reconnect_bt_addr=normalized_reconnect_bt_addr
         )
     )
     startup_task.add_done_callback(_consume_task_exception)
@@ -334,7 +402,11 @@ async def wait_connected_async(timeout=60):
 async def reconnect_controller_async(timeout=DEFAULT_RECONNECT_TIMEOUT):
     global last_error
 
-    if not reconnect_bt_addr_global:
+    if not _parse_reconnect_bt_addr(
+        reconnect_bt_addr_global,
+        source="reconnect_bt_addr_global",
+        strict=False,
+    ):
         raise RuntimeError("reconnect_bt_addr is empty; cannot auto reconnect")
 
     await stop_controller_async(clear_last_error=False)
@@ -563,6 +635,7 @@ def health():
         "connected": connected,
         "controller": controller_name_global,
         "reconnect_bt_addr": reconnect_bt_addr_global,
+        "reconnect_bt_addr_valid": reconnect_bt_addr_global is not None,
         "phase": _current_phase(),
         "last_error": last_error
     })
@@ -574,15 +647,31 @@ def start():
 
     controller = data.get("controller", "PRO_CONTROLLER")
     device_id = data.get("device_id")
+    reconnect_bt_addr_present = "reconnect_bt_addr" in data
     reconnect_bt_addr = data.get("reconnect_bt_addr")
     force_restart = bool(data.get("force_restart", False))
+
+    try:
+        normalized_reconnect_bt_addr = _parse_reconnect_bt_addr(
+            reconnect_bt_addr,
+            source="reconnect_bt_addr",
+            strict=reconnect_bt_addr is not None,
+        )
+    except ValueError as exc:
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "phase": _current_phase(),
+            "last_error": last_error
+        }), 400
 
     try:
         result = run_async(
             start_controller_async(
                 controller_name=controller,
                 device_id=device_id,
-                reconnect_bt_addr=reconnect_bt_addr,
+                reconnect_bt_addr=normalized_reconnect_bt_addr,
+                set_reconnect_bt_addr=reconnect_bt_addr_present,
                 force_restart=force_restart
             ),
             timeout=10
